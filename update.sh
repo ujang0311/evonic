@@ -20,7 +20,7 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.0.1"
+VERSION_SCRIPT="1.0.2"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
 EVONIC_HOME="${EVONIC_HOME:-/opt/evonic}"
@@ -30,6 +30,22 @@ DASH_PORT="${EVONIC_PORT:-8080}"
 
 CHECK_ONLY=0; DRY_RUN=0; FORCE=0; DO_BACKUP=1; QUIET=0; TARGET_TAG=""
 RESTORE_MODIFIED=0
+
+# ── Wajib root — CEK DI SINI, sebelum argumen diparsing ────────────────────
+# (kalau dipindah ke bawah, $@ sudah habis di-shift oleh loop parsing dan
+#  re-exec sudo akan kehilangan opsi seperti --check / --dry-run)
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    printf "  Butuh root — mengulang lewat sudo...\n"
+    if [ $# -gt 0 ]; then
+      exec sudo -E bash -c "curl -sS '$SELF_URL' | bash -s -- $(printf '%q ' "$@")"
+    else
+      exec sudo -E bash -c "curl -sS '$SELF_URL' | bash"
+    fi
+  fi
+  printf "\n  ✗ Jalankan sebagai root:  curl -sS %s | sudo bash\n\n" "$SELF_URL" >&2
+  exit 1
+fi
 
 # ── Output helpers ──────────────────────────────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -115,14 +131,6 @@ while [ $# -gt 0 ]; do
 done
 
 # ── Prasyarat ───────────────────────────────────────────────────────────────
-if [ "$(id -u)" -ne 0 ]; then
-  if command -v sudo >/dev/null 2>&1; then
-    printf "  ${YLW}Butuh root — mengulang lewat sudo...${R}\n"
-    exec sudo -E bash -c "curl -sS '$SELF_URL' | bash -s -- $(printf '%q ' "$@")"
-  fi
-  die "Jalankan sebagai root:  curl -sS $SELF_URL | sudo bash"
-fi
-
 command -v git >/dev/null 2>&1 || die "git belum terpasang (apt install git)"
 command -v curl >/dev/null 2>&1 || die "curl belum terpasang (apt install curl)"
 
