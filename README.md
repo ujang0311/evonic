@@ -126,3 +126,21 @@ Diuji pada Cloud VPS IDCloudHost (Evonic v0.8.0 non-git → v1.2.0, dan v1.2.0 g
 | File `agents/<id>/` (prompt + KB) | utuh setelah update |
 | `shared/db/evonic.db` | checksum identik sebelum/sesudah |
 | File tracked dimodifikasi lokal | terdeteksi, disalin + `.patch` ke folder backup |
+
+## Helper: `evonic-refresh-app-info`
+
+Menyalin `evonic-refresh-app-info` ke `/usr/local/bin/` supaya banner login IDCloudHost
+(`/etc/idch-app-info`) tidak lagi menampilkan versi basi setelah update:
+
+```bash
+sudo install -m 755 evonic-refresh-app-info /usr/local/bin/evonic-refresh-app-info
+sudo mkdir -p /etc/systemd/system/evonic.service.d
+sudo tee /etc/systemd/system/evonic.service.d/10-refresh-app-info.conf >/dev/null <<'EOF'
+[Service]
+ExecStartPost=/usr/local/bin/evonic-refresh-app-info
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart evonic
+```
+
+`update.sh` memanggil helper ini otomatis setelah update (kalau helper ada).

@@ -20,7 +20,7 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.0.4"
+VERSION_SCRIPT="1.0.5"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
 EVONIC_HOME="${EVONIC_HOME:-/opt/evonic}"
@@ -384,6 +384,12 @@ chown -R "$SVC_USER:$SVC_USER" "$EVONIC_HOME" 2>/dev/null && ok "ownership → $
 systemctl daemon-reload 2>/dev/null || true
 systemctl start "$SERVICE_NAME" 2>/dev/null || true
 ok "service dijalankan"
+
+# sinkronkan banner login IDCloudHost (/etc/idch-app-info) — ditulis sekali saat
+# deploy App Catalog sehingga versinya basi setelah update
+if [ -x /usr/local/bin/evonic-refresh-app-info ]; then
+  /usr/local/bin/evonic-refresh-app-info && ok "banner login (/etc/idch-app-info) disinkronkan"
+fi
 
 # ── [8/8] Smoke test ───────────────────────────────────────────────────────
 step "[8/8] Uji dasbor di port $DASH_PORT"

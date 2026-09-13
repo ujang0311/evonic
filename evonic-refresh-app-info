@@ -1,0 +1,41 @@
+#!/bin/bash
+# evonic-refresh-app-info — sinkronkan baris live di banner login IDCloudHost
+# (/etc/idch-app-info ditulis sekali saat deploy App Catalog, jadi versinya basi
+#  setelah `evonic update`). Script ini dipanggil otomatis oleh systemd
+# (drop-in: /etc/systemd/system/evonic.service.d/10-refresh-app-info.conf)
+# dan oleh update.sh setelah update.
+set -u
+
+F="${EVONIC_APP_INFO:-/etc/idch-app-info}"
+[ -f "$F" ] || exit 0
+
+H="${EVONIC_HOME:-/opt/evonic}"
+PORT="${EVONIC_PORT:-8080}"
+
+VER=""
+[ -f "$H/VERSION" ] && VER=$(tr -d ' \n' < "$H/VERSION")
+[ -z "$VER" ] && VER=$(git -C "$H" describe --tags 2>/dev/null | sed 's/^v//' | tr -d ' \n')
+
+SVC=$(systemctl is-active evonic 2>/dev/null || echo unknown)
+case "$SVC" in
+  active)   STATUS="Running" ;;
+  failed)   STATUS="Failed" ;;
+  inactive) STATUS="Stopped" ;;
+  *)        STATUS="${SVC:-Unknown}" ;;
+esac
+
+PUB=$(curl -s -m 4 ifconfig.me 2>/dev/null | tr -d ' \n')
+[ -n "$PUB" ] || PUB=$(hostname -I 2>/dev/null | awk '{print $1}')
+PRIV=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+TMP=$(mktemp) || exit 0
+sed -E \
+  -e "s|^(  Version      : ).*|\1v${VER}|" \
+  -e "s|^(  Dashboard    : ).*|\1http://${PUB}:${PORT}|" \
+  -e "s|^(  Public IP    : ).*|\1${PUB}|" \
+  -e "s|^(  Private IP   : ).*|\1${PRIV}|" \
+  -e "s|^(  Status       : ).*|\1${STATUS}|" \
+  "$F" > "$TMP" 2>/dev/null && cat "$TMP" > "$F"
+rm -f "$TMP"
+chmod 644 "$F" 2>/dev/null || true
+exit 0
