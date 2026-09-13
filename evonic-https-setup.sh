@@ -23,7 +23,7 @@
 # ============================================================================
 set -u -o pipefail
 
-VERSION_HELPER="1.0.0"
+VERSION_HELPER="1.0.1"
 PORT="${EVONIC_PORT:-8080}"
 EVONIC_HOME="${EVONIC_HOME:-/opt/evonic}"
 SERVICE_NAME="${EVONIC_SERVICE:-evonic}"
@@ -122,27 +122,63 @@ if [ "$USE_CERTBOT" -eq 1 ]; then
 fi
 
 # ── 4. Install nginx + certbot ──────────────────────────────────────────────
-step "[4/6] Siapkan nginx"${USE_CERTBOT:+$'\n'}
+step "[4/6] Siapkan nginx"
+APT_LOG=/tmp/evonic_apt.log
+# Deteksi IPv6: banyak VPS (termasuk IDCloudHost) IPv6-nya nonaktif, sementara
+# nginx.conf bawaan Ubuntu listen di [::]:80 → service gagal start
+# ("socket() [::]:80 failed (97: Address family not supported by protocol)").
+IPV6_OK=0
+if [ -s /proc/net/if_inet6 ]; then IPV6_OK=1; fi
+if command -v ip >/dev/null 2>&1; then ip -6 route show 2>/dev/null | grep -q . && IPV6_OK=1; fi
+[ "$IPV6_OK" -eq 0 ] && info "IPv6 tidak tersedia di VPS ini — listen [::] akan dinonaktifkan"
+
 if ! command -v nginx >/dev/null 2>&1; then
   info "install nginx..."
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx >/dev/null 2>&1 \
-    || die "gagal install nginx (apt)"
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq >"$APT_LOG" 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx >>"$APT_LOG" 2>&1 || true
 fi
-ok "nginx $(nginx -v 2>&1 | sed 's#nginx version: ##')"
+
+# netralkan listen [::] bawaan sebelum dpkg mencoba start service
+if [ "$IPV6_OK" -eq 0 ] && [ -f /etc/nginx/nginx.conf ]; then
+  if grep -qE '^[[:space:]]*listen[[:space:]]+\[::\]' /etc/nginx/nginx.conf; then
+    sed -i -E 's|^([[:space:]]*)(listen[[:space:]]+\[::\][^;]*;)|\1# \2  # IPv6 tidak tersedia|' /etc/nginx/nginx.conf
+    ok "listen [::] di nginx.conf dinonaktifkan"
+  fi
+fi
+# selesaikan paket yang tertinggal setengah terpasang (percobaan gagal sebelumnya)
+DEBIAN_FRONTEND=noninteractive dpkg --configure -a >>"$APT_LOG" 2>&1 || true
+
+if ! command -v nginx >/dev/null 2>&1; then
+  tail -8 "$APT_LOG" | sed 's/^/      /'
+  die "gagal install nginx — detail: $APT_LOG"
+fi
+# kalau masih gagal start, bersihkan listen [::] di vhost yang aktif lalu coba lagi
+if ! systemctl start nginx 2>/dev/null; then
+  for f in /etc/nginx/sites-enabled/*; do
+    [ -f "$f" ] || continue
+    grep -qE 'listen[[:space:]]+\[::\]' "$f" 2>/dev/null && \
+      sed -i -E 's|^([[:space:]]*)(listen[[:space:]]+\[::\][^;]*;)|\1# \2|' "$f"
+  done
+  systemctl start nginx 2>/dev/null || true
+fi
+systemctl is-active nginx >/dev/null 2>&1 \
+  && ok "nginx $(nginx -v 2>&1 | sed 's#nginx version: ##') aktif" \
+  || warn "nginx belum aktif — cek: journalctl -u nginx -n 20"
 if [ "$USE_CERTBOT" -eq 1 ] && ! command -v certbot >/dev/null 2>&1; then
   info "install certbot..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx >/dev/null 2>&1 \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx >>"$APT_LOG" 2>&1 \
     || warn "certbot gagal diinstall — lanjut tanpa sertifikat otomatis"
 fi
 
 CONF="/etc/nginx/sites-available/evonic-${DOMAIN}.conf"
 step "[5/6] Tulis reverse proxy $DOMAIN → 127.0.0.1:$PORT"
+LISTEN6=""
+[ "$IPV6_OK" -eq 1 ] && LISTEN6="    listen [::]:80;"
 cat > "$CONF" <<NGINX
 # Evonic dashboard — dibuat oleh evonic-https-setup.sh
 server {
     listen 80;
-    listen [::]:80;
+${LISTEN6}
     server_name ${DOMAIN};
 
     client_max_body_size 200m;
