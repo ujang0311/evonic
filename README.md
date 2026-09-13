@@ -207,3 +207,19 @@ start (`socket() [::]:80 failed (97: Address family not supported by protocol)`)
 `dpkg` ikut gagal. `evonic-https-setup.sh` mendeteksi ini, menonaktifkan baris
 `listen [::]` di `nginx.conf` + vhost, lalu merapikan paket setengah terpasang
 (`dpkg --configure -a`).
+
+### Kalau update "macet" di step [3/8] Siapkan repository git
+
+Versi lama menjalankan `git fetch` tanpa indikator progres dan tanpa batas waktu, jadi
+jaringan VPS yang stall terlihat seperti hang. Sejak **v1.1.2**:
+
+| Perilaku | Detail |
+|---|---|
+| Heartbeat | baris `· fetch full 12s (~15 MB terunduh)` diperbarui tiap 3 detik |
+| Anti-stall | `http.lowSpeedLimit=1000` + `http.lowSpeedTime=30` → transfer di bawah 1 KB/s selama 30 detik langsung dibatalkan |
+| Batas waktu | `EVONIC_FETCH_TIMEOUT` (default 240 detik, bisa dioverride lewat env) |
+| Fallback | instalasi non-git ambil `--depth 1` dulu (jauh lebih cepat), history penuh disusul di belakang lewat `git fetch --unshallow` (log: `/var/log/evonic/git-unshallow.log`) |
+| Gagal total | berhenti dengan diagnostik: tail log fetch + cek apakah `github.com` terjangkau dari VPS, **tanpa** mengubah apa pun |
+
+Kalau macet lagi: `Ctrl+C` (aman — step 3 belum mengubah data), lalu cek
+`du -sh /opt/evonic/.git` untuk melihat progres, dan ulangi perintah updater.
