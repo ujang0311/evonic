@@ -102,3 +102,27 @@ bash update.sh --tag v0.8.0
 - Default non-interaktif supaya aman dijalankan via `curl | bash`.
 - Tidak menyentuh unit systemd, konfigurasi `/etc/evonic/`, port, maupun layout path instalasi.
 - Repo ini berisi script updater saja; kode Evonic-nya ada di [anvie/evonic](https://github.com/anvie/evonic).
+
+## Troubleshooting
+
+| Gejala | Sebab / solusi |
+|---|---|
+| `404` saat curl URL tanpa segmen branch | raw.githubusercontent wajib menyertakan ref. Pakai `.../evonic/main/update.sh`, `.../evonic/HEAD/update.sh`, atau `.../evonic/refs/heads/main/update.sh` |
+| Output script masih versi lama setelah repo diubah | CDN raw.githubusercontent punya cache beberapa menit. Pakai bentuk `refs/heads/main` untuk konten paling baru |
+| `.env` bertambah key setelah update | Itu ditulis aplikasi Evonic sendiri (key fitur baru), bukan oleh script. Nilai key lama tidak hilang |
+| `warning: remote.origin.fetch has multiple values` | Sudah ditangani otomatis (`--replace-all`) sejak v1.0.1 |
+| `detected dubious ownership in repository` | Script otomatis menambahkan `safe.directory`. Manual: `git config --global --add safe.directory /opt/evonic` |
+| `git status` menunjukkan file `M` (`.githooks/*`, `bin/rg`, dll) | Perubahan mode executable dari `evonic-fix-perms` — bukan perubahan isi, tidak memengaruhi update |
+
+## Hasil uji
+
+Diuji pada Cloud VPS IDCloudHost (Evonic v0.8.0 non-git → v1.2.0, dan v1.2.0 git repo):
+
+| Skenario | Hasil |
+|---|---|
+| Instalasi App Catalog tanpa `.git` | konversi + update berhasil, exit 0 |
+| Instalasi git repo normal | update berhasil, exit 0, dashboard HTTP 200 |
+| `skills/config.json` dimodifikasi user | terdeteksi, ditimpa checkout, **dikembalikan otomatis** |
+| File `agents/<id>/` (prompt + KB) | utuh setelah update |
+| `shared/db/evonic.db` | checksum identik sebelum/sesudah |
+| File tracked dimodifikasi lokal | terdeteksi, disalin + `.patch` ke folder backup |
