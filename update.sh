@@ -20,7 +20,7 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.0.0"
+VERSION_SCRIPT="1.0.1"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
 EVONIC_HOME="${EVONIC_HOME:-/opt/evonic}"
@@ -42,9 +42,16 @@ fi
 
 W=64
 rule()  { printf "${GRY}%s${R}\n" "$(printf '─%.0s' $(seq 1 $W))"; }
+# padding manual: printf "%-*s" menghitung byte, karakter multibyte (✓ ╭ ★) merusak lebar kotak
+boxline() {
+  local txt="$1" pad
+  pad=$(( W - 6 - ${#txt} ))
+  [ "$pad" -lt 1 ] && pad=1
+  printf "${HDR:-$PRP}${B}  │${R}  ${B}%s${R}%*s${HDR:-$PRP}${B}│${R}\n" "$txt" "$pad" ""
+}
 title() {
   printf "\n${PRP}${B}  ╭%s╮${R}\n" "$(printf '─%.0s' $(seq 1 $((W-4))))"
-  printf "${PRP}${B}  │${R}  ${B}%-*s${R}${PRP}${B}│${R}\n" $((W-6)) "$1"
+  HDR="$PRP" boxline "$1"
   printf "${PRP}${B}  ╰%s╯${R}\n\n" "$(printf '─%.0s' $(seq 1 $((W-4))))"
 }
 step()  { printf "  ${CYN}▸${R} ${B}%s${R}\n" "$1"; }
@@ -257,7 +264,8 @@ if [ -n "$CUR_TAG" ]; then
       if [ ! -f \"\$p\" ]; then echo \"MISSING \$p\";
       else [ \"\$(git hash-object \"\$p\" 2>/dev/null)\" = \"\$sha\" ] || echo \"MODIFIED \$p\"; fi
     done" > "$MODLIST" 2>/dev/null || true
-  MODIFIED_COUNT=$(grep -c '^MODIFIED' "$MODLIST" 2>/dev/null || echo 0)
+  MODIFIED_COUNT=$(grep -c '^MODIFIED' "$MODLIST" 2>/dev/null)
+  case "$MODIFIED_COUNT" in ''|*[!0-9]*) MODIFIED_COUNT=0 ;; esac
   while read -r kind p; do
     [ "$kind" = "MODIFIED" ] || continue
     mkdir -p "$BK/modified/$(dirname "$p")" 2>/dev/null
@@ -373,8 +381,7 @@ printf "\n"
 IP=$(curl -s -m 5 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
 HDR="$GRN"; [ "$HTTP" = "200" ] || HDR="$YLW"
 printf "${HDR}${B}  ╭%s╮${R}\n" "$(printf '─%.0s' $(seq 1 $((W-4))))"
-printf "${HDR}${B}  │${R}  ${B}%-*s${R}${HDR}${B}│${R}\n" $((W-6)) \
-  "$( [ "$HTTP" = "200" ] && echo '✓ Evonic berhasil diupdate' || echo '! Update selesai, tapi perlu dicek' )"
+boxline "$( [ "$HTTP" = "200" ] && echo '✓ Evonic berhasil diupdate' || echo '! Update selesai, perlu dicek' )"
 printf "${HDR}${B}  ╰%s╯${R}\n\n" "$(printf '─%.0s' $(seq 1 $((W-4))))"
 
 kv "versi"      "${B}$OLD_VERSION → $NEW_VERSION${R}  ($LATEST_TAG)"
