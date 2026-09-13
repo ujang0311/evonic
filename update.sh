@@ -23,7 +23,7 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.1.1"
+VERSION_SCRIPT="1.1.2"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
 BASE_URL="${SELF_URL%/*}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
@@ -242,11 +242,18 @@ WAS_GIT=0
 
 # ── [1/8] Cek jaringan + tag terbaru ────────────────────────────────────────
 step "[1/8] Cek rilis terbaru di GitHub"
-LATEST_TAG=$(git ls-remote --tags --refs "$REPO_URL" 2>/dev/null \
+LATEST_TAG=$(timeout 60 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+    ls-remote --tags --refs "$REPO_URL" 2>/dev/null \
   | sed 's|.*refs/tags/||' \
   | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
   | sort -V | tail -1)
-[ -n "$LATEST_TAG" ] || die "Tidak bisa membaca tag rilis dari $REPO_URL (cek koneksi internet server)"
+if [ -z "$LATEST_TAG" ]; then
+  bad "Tidak bisa membaca tag rilis dari $REPO_URL"
+  GH=$(curl -sI -m 10 https://github.com 2>/dev/null | head -1)
+  if [ -n "$GH" ]; then info "github.com terjangkau: $GH — coba lagi (jaringan mungkin lambat)"
+  else warn "github.com tidak bisa diakses dari server ini — cek DNS/jaringan VPS"; fi
+  die "Update dibatalkan. Tidak ada perubahan yang dilakukan."
+fi
 [ -n "$TARGET_TAG" ] && LATEST_TAG="$TARGET_TAG"
 ok "target rilis: ${B}$LATEST_TAG${R}"
 kv "versi lokal" "$OLD_VERSION"
