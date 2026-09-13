@@ -20,7 +20,7 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.0.3"
+VERSION_SCRIPT="1.0.4"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
 EVONIC_HOME="${EVONIC_HOME:-/opt/evonic}"
@@ -280,12 +280,13 @@ if [ -n "$CUR_TAG" ]; then
       if [ ! -f \"\$p\" ]; then echo \"MISSING \$p\";
       else [ \"\$(git hash-object \"\$p\" 2>/dev/null)\" = \"\$sha\" ] || echo \"MODIFIED \$p\"; fi
     done" > "$MODLIST_RAW" 2>/dev/null || true
-  SKIPPED_NOISE=$(grep -c "MODIFIED" "$MODLIST_RAW" 2>/dev/null || true)
   awk -v re="$NOISE_RE" '{ p=$2; if (p !~ re) print }' "$MODLIST_RAW" > "$MODLIST" 2>/dev/null || : > "$MODLIST"
-  SKIPPED_NOISE=$(( ${SKIPPED_NOISE:-0} - $(grep -c '^MODIFIED' "$MODLIST" 2>/dev/null || echo 0) ))
-  case "$SKIPPED_NOISE" in ''|*[!0-9]*) SKIPPED_NOISE=0 ;; esac
   MODIFIED_COUNT=$(grep -c '^MODIFIED' "$MODLIST" 2>/dev/null)
   case "$MODIFIED_COUNT" in ''|*[!0-9]*) MODIFIED_COUNT=0 ;; esac
+  NOISE_ONLY=$(grep -c '^MODIFIED' "$MODLIST_RAW" 2>/dev/null)
+  case "$NOISE_ONLY" in ''|*[!0-9]*) NOISE_ONLY=0 ;; esac
+  SKIPPED_NOISE=$(( NOISE_ONLY - MODIFIED_COUNT ))
+  [ "$SKIPPED_NOISE" -lt 0 ] && SKIPPED_NOISE=0
   while read -r kind p; do
     [ "$kind" = "MODIFIED" ] || continue
     mkdir -p "$BK/modified/$(dirname "$p")" 2>/dev/null
