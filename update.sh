@@ -12,6 +12,9 @@
 #    bash update.sh --tag v1.2.0       paksa update/rollback ke tag tertentu
 #    bash update.sh --force            jalankan walau sudah versi terbaru
 #    bash update.sh --no-backup        lewati backup (tidak disarankan)
+#    bash update.sh --http-only        akses lewat http://IP:8080 (csrf/cookie disesuaikan)
+#    bash update.sh --https --domain d --email e   langsung pasang HTTPS + domain
+#    bash update.sh --no-prompt        lewati tanya HTTP/HTTPS di akhir update
 #    bash update.sh --quiet            output ringkas
 #    bash update.sh --help
 #
@@ -20,8 +23,9 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.0.5"
+VERSION_SCRIPT="1.1.0"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
+BASE_URL="${SELF_URL%/*}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
 EVONIC_HOME="${EVONIC_HOME:-/opt/evonic}"
 BACKUP_ROOT="${EVONIC_BACKUP_DIR:-/var/backups/evonic}"
@@ -30,6 +34,7 @@ DASH_PORT="${EVONIC_PORT:-8080}"
 
 CHECK_ONLY=0; DRY_RUN=0; FORCE=0; DO_BACKUP=1; QUIET=0; TARGET_TAG=""
 RESTORE_MODIFIED=0
+MODE_HTTP_ONLY=0; MODE_HTTPS=0; NO_PROMPT=0; HTTPS_DOMAIN=""; HTTPS_EMAIL=""
 
 # ── Wajib root — CEK DI SINI, sebelum argumen diparsing ────────────────────
 # (kalau dipindah ke bawah, $@ sudah habis di-shift oleh loop parsing dan
@@ -121,6 +126,13 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1 ;;
     --no-backup) DO_BACKUP=0 ;;
     --restore-modified) RESTORE_MODIFIED=1 ;;
+    --http-only) MODE_HTTP_ONLY=1 ;;
+    --https) MODE_HTTPS=1 ;;
+    --no-prompt) NO_PROMPT=1 ;;
+    --domain) shift; HTTPS_DOMAIN="${1:-}" ;;
+    --domain=*) HTTPS_DOMAIN="${1#*=}" ;;
+    --email) shift; HTTPS_EMAIL="${1:-}" ;;
+    --email=*) HTTPS_EMAIL="${1#*=}" ;;
     --quiet|-q) QUIET=1 ;;
     --tag) shift; TARGET_TAG="${1:-}"; [ -n "$TARGET_TAG" ] || die "--tag butuh nilai, contoh: --tag v1.2.0" ;;
     --tag=*) TARGET_TAG="${1#*=}" ;;
@@ -163,6 +175,60 @@ notify_telegram() { # $1 = judul, $2 = isi
   curl -sS -m 15 "https://api.telegram.org/bot${NOTIFY_TELEGRAM_TOKEN}/sendMessage" \
     -d "chat_id=${NOTIFY_TELEGRAM_CHAT}" -d "parse_mode=HTML" \
     -d "text=<b>$1</b>%0A$2" >/dev/null 2>&1 || true
+}
+
+# baca input dari terminal — penting karena `curl | bash` memakai stdin untuk script
+have_tty() { { exec 9</dev/tty; } 2>/dev/null && { exec 9<&-; return 0; }; return 1; }
+
+ask() { # $1 prompt, $2 default
+  local prompt="$1" def="${2:-}" ans=""
+  printf "%s" "$prompt"
+  if have_tty; then IFS= read -r ans < /dev/tty 2>/dev/null || ans=""; fi
+  printf "\n"
+  [ -n "$ans" ] || ans="$def"
+  printf '%s' "$ans"
+}
+
+# pasang/segarkan helper dari repo (BASE_URL diturunkan dari SELF_URL)
+fetch_helper() { # $1 nama file, $2 tujuan
+  local name="$1" dest="$2"
+  if [ -s "$dest" ] && [ "${REFRESH_HELPERS:-1}" -eq 0 ]; then return 0; fi
+  if curl -fsS -m 30 "$BASE_URL/$name" -o "$dest.tmp" 2>/dev/null && [ -s "$dest.tmp" ]; then
+    mv "$dest.tmp" "$dest"; chmod 755 "$dest"; return 0
+  fi
+  rm -f "$dest.tmp" 2>/dev/null
+  [ -x "$dest" ] && return 0
+  return 1
+}
+
+# mode cookie: HTTPS aktif → Secure; HTTP saja → cookie non-Secure supaya login jalan
+ensure_cookie_mode() { # $1 = https|http
+  local want="$1" val="1" f="$EVONIC_HOME/.env"
+  [ "$want" = "https" ] && val="0"
+  [ -f "$f" ] || return 0
+  if grep -q '^FORCE_INSECURE_COOKIES=' "$f"; then
+    cur=$(grep '^FORCE_INSECURE_COOKIES=' "$f" | head -1 | cut -d= -f2)
+    if [ "$cur" = "$val" ]; then set_env_cookie_note="sudah"; return 0; fi
+    sed -i "s/^FORCE_INSECURE_COOKIES=.*/FORCE_INSECURE_COOKIES=$val/" "$f"
+  else
+    echo "FORCE_INSECURE_COOKIES=$val" >> "$f"
+  fi
+  chown "$SVC_USER:$SVC_USER" "$f" 2>/dev/null || true
+  set_env_cookie_note="diubah"
+}
+
+# apakah sudah ada vhost HTTPS yang mem-proxy port dashboard?
+https_configured() {
+  [ -d /etc/nginx/sites-enabled ] || return 1
+  grep -rls "proxy_pass http://127.0.0.1:$DASH_PORT" /etc/nginx/sites-enabled/ 2>/dev/null | while read -r c; do
+    grep -q "ssl_certificate" "$c" && echo yes
+  done | grep -q yes
+}
+
+# nama domain dari vhost HTTPS yang aktif (untuk ditampilkan di ringkasan)
+https_domain() {
+  grep -rls "proxy_pass http://127.0.0.1:$DASH_PORT" /etc/nginx/sites-enabled/ 2>/dev/null \
+    | xargs -r grep -h "server_name" 2>/dev/null | awk '{print $2}' | tr -d ';' | grep -v '_' | head -1
 }
 
 # ── Mulai ───────────────────────────────────────────────────────────────────
@@ -385,11 +451,34 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl start "$SERVICE_NAME" 2>/dev/null || true
 ok "service dijalankan"
 
-# sinkronkan banner login IDCloudHost (/etc/idch-app-info) — ditulis sekali saat
-# deploy App Catalog sehingga versinya basi setelah update
-if [ -x /usr/local/bin/evonic-refresh-app-info ]; then
-  /usr/local/bin/evonic-refresh-app-info && ok "banner login (/etc/idch-app-info) disinkronkan"
+# helper: banner App Catalog (/etc/idch-app-info) ditulis sekali saat deploy → versinya
+# harus disinkronkan tiap update, otomatis lewat ExecStartPost
+if fetch_helper "evonic-refresh-app-info" /usr/local/bin/evonic-refresh-app-info; then
+  ok "helper banner versi dipasang/diperbarui"
+  mkdir -p "/etc/systemd/system/${SERVICE_NAME}.service.d"
+  printf '[Service]\nExecStartPost=/usr/local/bin/evonic-refresh-app-info\n' \
+    > "/etc/systemd/system/${SERVICE_NAME}.service.d/10-refresh-app-info.conf"
+  systemctl daemon-reload 2>/dev/null || true
+  /usr/local/bin/evonic-refresh-app-info >/dev/null 2>&1 && ok "banner login disinkronkan (Version/Status/IP)"
+else
+  info "helper banner tidak tersedia (offline?) — dilewati"
 fi
+
+# helper HTTPS+domain (dipanggil nanti kalau user memilih opsi itu)
+fetch_helper "evonic-https-setup.sh" /usr/local/bin/evonic-https-setup.sh \
+  && info "helper HTTPS tersedia: /usr/local/bin/evonic-https-setup.sh" || true
+
+#mode cookie: HTTPS aktif → Secure; HTTP saja → cookie non-Secure supaya login jalan
+if https_configured; then COOKIE_MODE="https"; else COOKIE_MODE="http"; fi
+set_env_cookie_note=""
+ensure_cookie_mode "$COOKIE_MODE"
+case "${set_env_cookie_note:-}" in
+  diubah)
+    ok "cookie disesuaikan untuk mode $COOKIE_MODE (FORCE_INSECURE_COOKIES=$( [ "$COOKIE_MODE" = https ] && echo 0 || echo 1 ))"
+    systemctl restart "$SERVICE_NAME" 2>/dev/null || true; sleep 5 ;;
+  sudah) ok "cookie sudah sesuai mode $COOKIE_MODE" ;;
+  *) ;;
+esac
 
 # ── [8/8] Smoke test ───────────────────────────────────────────────────────
 step "[8/8] Uji dasbor di port $DASH_PORT"
@@ -412,20 +501,21 @@ printf "${HDR}${B}  ╭%s╮${R}\n" "$(printf '─%.0s' $(seq 1 $((W-4))))"
 boxline "$( [ "$HTTP" = "200" ] && echo '✓ Evonic berhasil diupdate' || echo '! Update selesai, perlu dicek' )"
 printf "${HDR}${B}  ╰%s╯${R}\n\n" "$(printf '─%.0s' $(seq 1 $((W-4))))"
 
+if https_configured; then
+  CUR_URL="https://$(https_domain)  (tanpa port)"
+else
+  CUR_URL="http://${IP:-<ip-server>}:$DASH_PORT"
+fi
 kv "versi"      "${B}$OLD_VERSION → $NEW_VERSION${R}  ($LATEST_TAG)"
 kv "service"   "$SVC_STATE"
-kv "dashboard" "http://${IP:-<ip-server>}:$DASH_PORT  (HTTP $HTTP)"
+kv "akses"     "$CUR_URL"
 kv "durasi"    "$(elapsed)"
 kv "backup"    "$BK"
 kv "log"       "/var/log/evonic/evonic-update.log"
 [ "$MODIFIED_COUNT" -gt 0 ] && kv "catatan" "$MODIFIED_COUNT file lokal dimodifikasi — lihat $MODLIST"
 grep -q '^MISSING' "$MODLIST" 2>/dev/null && kv "catatan" "ada file tracked hilang — lihat $MODLIST"
 
-if [ "$HTTP" = "200" ]; then
-  printf "\n  ${GRN}Selesai. Buka ${B}http://${IP:-ip-server}:$DASH_PORT${R}${GRN} — config & data agen kamu tidak berubah.${R}\n\n"
-  notify_telegram "Evonic updated: $OLD_VERSION → $NEW_VERSION" \
-    "host: $(hostname)%0Aservice: $SVC_STATE%0Adashboard: http://${IP:-ip}:$DASH_PORT%0Adurasi: $(elapsed)%0Abackup: $BK"
-else
+if [ "$HTTP" != "200" ]; then
   printf "\n  ${YLW}${B}Dasbor belum merespons di port $DASH_PORT.${R}\n"
   printf "  ${GRY}  Cek: systemctl status $SERVICE_NAME ; tail -50 /var/log/evonic/evonic.service.log${R}\n"
   printf "  ${GRY}  Rollback: tar xzf $BK/evonic-full.tar.gz -C $(dirname "$EVONIC_HOME") && systemctl restart $SERVICE_NAME${R}\n\n"
@@ -433,3 +523,75 @@ else
     "host: $(hostname)%0Aversi: $OLD_VERSION → $NEW_VERSION%0Aservice: $SVC_STATE%0Adashboard HTTP: $HTTP"
   exit 1
 fi
+
+notify_telegram "Evonic updated: $OLD_VERSION → $NEW_VERSION" \
+  "host: $(hostname)%0Aservice: $SVC_STATE%0Aakses: $CUR_URL%0Adurasi: $(elapsed)%0Abackup: $BK"
+
+# ── Pilih mode akses: HTTP saja atau HTTPS + domain ────────────────────────
+HTTPS_FLOW=0
+[ "$MODE_HTTPS" -eq 1 ] && HTTPS_FLOW=1
+[ -n "$HTTPS_DOMAIN" ] && HTTPS_FLOW=1
+
+if [ "$HTTPS_FLOW" -eq 0 ] && [ "$MODE_HTTP_ONLY" -eq 0 ] && [ "$NO_PROMPT" -eq 0 ] \
+   && ! https_configured && have_tty; then
+  printf "\n"
+  rule
+  printf "  ${B}${PRP}Akses dashboard — pilih mode${R}\n\n"
+  printf "    ${CYN}1${R}) ${B}HTTP saja${R}          ${GRY}→ $CUR_URL  (cookie non-Secure, cukup untuk testing/internal)${R}\n"
+  printf "    ${CYN}2${R}) ${B}HTTPS + domain${R}     ${GRY}→ https://domain-anda (tanpa port, cookie Secure)${R}\n\n"
+  printf "  ${GRY}  Mode HTTP tetap bisa diubah ke HTTPS kapan saja tanpa update ulang.${R}\n"
+  CH=$(ask "  Pilih [1/2] (enter = 1): " "1")
+  case "$CH" in 2|https|HTTPS|Https) HTTPS_FLOW=1 ;; *) HTTPS_FLOW=0 ;; esac
+fi
+
+if [ "$HTTPS_FLOW" -eq 1 ]; then
+  printf "\n"
+  rule
+  printf "  ${YLW}${B}SEBELUM LANJUT — A record harus diarahkan ke IP publik VPS ini${R}\n\n"
+  printf "  ${GRY}  Di DNS management domainmu, tambahkan record:${R}\n"
+  printf "    ${B}Type${R}   : A\n"
+  printf "    ${B}Name${R}   : %s   ${GRY}(subdomain, mis. evonic.domainmu.com → isi \"evonic\")${R}\n" "${HTTPS_DOMAIN:-evonic}"
+  printf "    ${B}Value${R}  : %s   ${GRY}(IP publik VPS ini)${R}\n" "${IP:-<ip-server>}"
+  printf "    ${B}TTL${R}    : 14400 (default)\n\n"
+  printf "  ${GRY}  Propagasi 5-30 menit. Port ${B}80${R}${GRY} & ${B}443${R}${GRY} harus terbuka di security group VPS,${R}\n"
+  printf "  ${GRY}  kalau tidak Let's Encrypt gagal memverifikasi.${R}\n\n"
+
+  [ -z "$HTTPS_DOMAIN" ] && HTTPS_DOMAIN=$(ask "  Domain/subdomain Evonic (mis. evonic.domainmu.com): " "")
+  if [ -z "$HTTPS_DOMAIN" ]; then
+    warn "domain kosong — HTTPS dilewati, dashboard tetap di $CUR_URL"
+    printf "  ${GRY}  Jalankan kapan saja: sudo /usr/local/bin/evonic-https-setup.sh --domain domainmu.com${R}\n"
+  elif ! printf '%s' "$HTTPS_DOMAIN" | grep -qE '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
+    warn "format domain tidak valid: $HTTPS_DOMAIN — HTTPS dilewati"
+  else
+    [ -z "$HTTPS_EMAIL" ] && HTTPS_EMAIL=$(ask "  Email untuk Let's Encrypt (enter = lewati): " "")
+    printf "\n"
+    step "Pasang HTTPS + domain: $HTTPS_DOMAIN"
+    HSCRIPT="/usr/local/bin/evonic-https-setup.sh"
+    if [ ! -x "$HSCRIPT" ]; then
+      T=$(mktemp)
+      if curl -fsS -m 30 "$BASE_URL/evonic-https-setup.sh" -o "$T" 2>/dev/null; then
+        chmod 755 "$T"; HSCRIPT="$T"
+      else
+        warn "helper HTTPS tidak bisa diambil (offline?)"
+        HSCRIPT=""
+      fi
+    fi
+    if [ -n "$HSCRIPT" ]; then
+      HS_ARGS=(--domain "$HTTPS_DOMAIN" --yes)
+      [ -n "$HTTPS_EMAIL" ] && HS_ARGS+=(--email "$HTTPS_EMAIL")
+      bash "$HSCRIPT" "${HS_ARGS[@]}" || warn "setup HTTPS berhenti — dashboard tetap di $CUR_URL"
+    fi
+  fi
+fi
+
+# ── Penutup ────────────────────────────────────────────────────────────────
+printf "\n"
+if https_configured; then
+  D=$(https_domain)
+  printf "  ${GRN}${B}✓ Selesai.${R} ${GRN}Buka ${B}https://%s${R}${GRN} — tanpa port, cookie Secure.${R}\n" "$D"
+  printf "  ${GRY}  HTTP otomatis dialihkan ke HTTPS. Config & data agen tidak berubah.${R}\n\n"
+else
+  printf "  ${GRN}${B}✓ Selesai.${R} ${GRN}Buka ${B}http://%s:%s${R}${GRN} — config & data agen tidak berubah.${R}\n" "${IP:-ip-server}" "$DASH_PORT"
+  printf "  ${GRY}  Mau HTTPS + domain nanti? ${R}${GRY}sudo /usr/local/bin/evonic-https-setup.sh --domain domainmu.com${R}\n\n"
+fi
+exit 0
