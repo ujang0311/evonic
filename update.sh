@@ -23,7 +23,7 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.1.0"
+VERSION_SCRIPT="1.1.1"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
 BASE_URL="${SELF_URL%/*}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
@@ -307,11 +307,36 @@ else
 fi
 
 # ── [3/8] Siapkan git repo (konversi kalau perlu) ───────────────────────────
+# fetch pakai heartbeat + batas waktu: full-history fetch dari GitHub di VPS
+# berjaringan lambat bisa makan beberapa menit dan tanpa progres tampak "hang".
+FETCH_TIMEOUT="${EVONIC_FETCH_TIMEOUT:-240}"
+SHALLOW_USED=0
+
+fetch_repo() { # $1 = full|shallow → 0 kalau sukses dan ada tag
+  local mode="$1" log=/tmp/evonic_fetch.log pid rc=0 waited=0 mb
+  local args="fetch --tags --force --progress origin"
+  [ "$mode" = "shallow" ] && args="fetch --depth 1 --tags --force --progress origin"
+  : > "$log"
+  run_as_svc "cd '$EVONIC_HOME' && timeout $FETCH_TIMEOUT git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 $args" \
+    >"$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 3; waited=$((waited+3))
+    mb=$(du -sm "$EVONIC_HOME/.git" 2>/dev/null | cut -f1)
+    printf "\r    ${GRY}· fetch %-7s %3ss  (~%s MB terunduh)   ${R}" "$mode" "$waited" "${mb:-0}"
+    [ "$waited" -gt $((FETCH_TIMEOUT+30)) ] && { kill "$pid" 2>/dev/null; break; }
+  done
+  wait "$pid" 2>/dev/null; rc=$?
+  printf "\r%*s\r" 60 ""
+  [ "$rc" -eq 0 ] && [ "$(g 'tag -l' 2>/dev/null | wc -l)" -gt 0 ]
+}
+
 step "[3/8] Siapkan repository git"
 if [ "$WAS_GIT" -eq 0 ]; then
   g "init -q" || die "git init gagal di $EVONIC_HOME"
   g "remote add origin $REPO_URL" 2>/dev/null || g "remote set-url origin $REPO_URL"
   ok "git repo dibuat (instalasi lama tanpa .git)"
+  info "fetch ringkas dulu (shallow) supaya cepat; history penuh menyusul di belakang"
 else
   g "remote set-url origin $REPO_URL" 2>/dev/null || true
 fi
@@ -319,11 +344,23 @@ fi
 g "config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'" 2>/dev/null || true
 g "config --get-all remote.origin.fetch" 2>/dev/null | grep -q 'refs/tags' \
   || g "config --add remote.origin.fetch '+refs/tags/*:refs/tags/*'" 2>/dev/null || true
-if g "fetch --tags --force origin" >/tmp/evonic_fetch.log 2>&1; then
-  ok "fetch tags OK ($(g 'tag -l' | wc -l) tag)"
+
+FETCH_OK=0
+if [ "$WAS_GIT" -eq 0 ]; then
+  if fetch_repo shallow;   then FETCH_OK=1; SHALLOW_USED=1; ok "fetch shallow OK ($(g 'tag -l' | wc -l) tag)"
+  elif fetch_repo full;    then FETCH_OK=1; ok "fetch penuh OK ($(g 'tag -l' | wc -l) tag)"; fi
 else
-  tail -5 /tmp/evonic_fetch.log >&2
-  die "git fetch gagal — cek koneksi/GitHub access dari server"
+  if fetch_repo full;      then FETCH_OK=1; ok "fetch OK ($(g 'tag -l' | wc -l) tag)"
+  elif fetch_repo shallow; then FETCH_OK=1; SHALLOW_USED=1; warn "fetch penuh lambat/gagal — lanjut dengan fetch shallow"; fi
+fi
+if [ "$FETCH_OK" -eq 0 ]; then
+  bad "git fetch ke $REPO_URL gagal setelah beberapa percobaan"
+  tail -4 /tmp/evonic_fetch.log 2>/dev/null | sed 's/^/      /'
+  GH=$(curl -sI -m 10 https://github.com 2>/dev/null | head -1)
+  if [ -n "$GH" ]; then info "github.com terjangkau: $GH"
+  else warn "github.com tidak bisa diakses dari server ini (cek DNS/jaringan VPS)"; fi
+  notify_telegram "Evonic update: git fetch gagal" "host: $(hostname)%0Arepo: $REPO_URL"
+  die "Update dihentikan sebelum ada perubahan. Coba lagi nanti, atau set EVONIC_REPO_URL ke mirror."
 fi
 
 CUR_TAG=$(g "describe --tags --abbrev=0" 2>/dev/null || echo "")
@@ -450,6 +487,13 @@ chown -R "$SVC_USER:$SVC_USER" "$EVONIC_HOME" 2>/dev/null && ok "ownership → $
 systemctl daemon-reload 2>/dev/null || true
 systemctl start "$SERVICE_NAME" 2>/dev/null || true
 ok "service dijalankan"
+
+# kalau tadi pakai fetch shallow: perdalam history di belakang (tidak menghambat update)
+if [ "$SHALLOW_USED" -eq 1 ]; then
+  setsid nohup bash -c "cd '$EVONIC_HOME' && git fetch --unshallow --tags --force origin >/var/log/evonic/git-unshallow.log 2>&1" \
+    >/dev/null 2>&1 < /dev/null &
+  info "history git diperdalam di belakang (opsional) — log: /var/log/evonic/git-unshallow.log"
+fi
 
 # helper: banner App Catalog (/etc/idch-app-info) ditulis sekali saat deploy → versinya
 # harus disinkronkan tiap update, otomatis lewat ExecStartPost
