@@ -20,7 +20,7 @@
 
 set -u -o pipefail
 
-VERSION_SCRIPT="1.0.2"
+VERSION_SCRIPT="1.0.3"
 SELF_URL="${EVONIC_UPDATE_URL:-https://raw.githubusercontent.com/ujang0311/evonic/main/update.sh}"
 REPO_URL="${EVONIC_REPO_URL:-https://github.com/anvie/evonic.git}"
 EVONIC_HOME="${EVONIC_HOME:-/opt/evonic}"
@@ -223,13 +223,17 @@ if [ "$DO_BACKUP" -eq 1 ]; then
 
   # snapshot kode + data penting supaya bisa rollback penuh
   # (--warning=no-file-changed: log service yang aktif berubah saat dibaca → bukan kegagalan nyata)
-  tar czf "$BK/evonic-full.tar.gz" -C "$(dirname "$EVONIC_HOME")" "$(basename "$EVONIC_HOME")" \
-      --exclude='.venv' --exclude='.git' --exclude='__pycache__' \
-      --warning=no-file-changed --ignore-failed-read 2>/tmp/evonic_tar.log
-  if [ -s "$BK/evonic-full.tar.gz" ] && tar tzf "$BK/evonic-full.tar.gz" >/dev/null 2>&1; then
-    ok "snapshot  $BK/evonic-full.tar.gz ($(du -h "$BK/evonic-full.tar.gz" | cut -f1))"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "dry-run: snapshot penuh dilewati"
   else
-    warn "snapshot gagal — cek /tmp/evonic_tar.log (lanjut tanpa snapshot penuh)"
+    tar czf "$BK/evonic-full.tar.gz" -C "$(dirname "$EVONIC_HOME")" "$(basename "$EVONIC_HOME")" \
+        --exclude='.venv' --exclude='.git' --exclude='__pycache__' \
+        --warning=no-file-changed --ignore-failed-read 2>/tmp/evonic_tar.log
+    if [ -s "$BK/evonic-full.tar.gz" ] && tar tzf "$BK/evonic-full.tar.gz" >/dev/null 2>&1; then
+      ok "snapshot  $BK/evonic-full.tar.gz ($(du -h "$BK/evonic-full.tar.gz" | cut -f1))"
+    else
+      warn "snapshot gagal — cek /tmp/evonic_tar.log (lanjut tanpa snapshot penuh)"
+    fi
   fi
   kv "lokasi" "$BK"
 else
@@ -264,14 +268,22 @@ fi
 # ── [4/8] Deteksi modifikasi lokal pada file tracked ───────────────────────
 step "[4/8] Periksa modifikasi lokal (file yang akan ditimpa checkout)"
 MODLIST="$BK/modified/modified.txt"
-: > "$MODLIST" 2>/dev/null || MODLIST=/tmp/evonic_modified.txt
+MODLIST_RAW="${MODLIST%.txt}.raw.txt"
+: > "$MODLIST_RAW" 2>/dev/null || { MODLIST=/tmp/evonic_modified.txt; MODLIST_RAW=/tmp/evonic_modified.raw.txt; }
+# artefak yang rutin di-rebuild/dinormalisasi app sendiri → bukan modifikasi user, jangan bikin panik
+NOISE_RE='^(skills/config\.json|static/js/chat-ui\.js|static/css/(evonic|tailwind)\.css|backend/promptpurify/.*\.onnx|backend/tools/runpy_helpers/bin/rg|\.githooks/.*|install\.sh)$'
 MODIFIED_COUNT=0
+SKIPPED_NOISE=0
 if [ -n "$CUR_TAG" ]; then
   run_as_svc "cd '$EVONIC_HOME' && git ls-tree -r '$CUR_TAG' | while read m t sha p; do
       [ \"\$t\" = blob ] || continue
       if [ ! -f \"\$p\" ]; then echo \"MISSING \$p\";
       else [ \"\$(git hash-object \"\$p\" 2>/dev/null)\" = \"\$sha\" ] || echo \"MODIFIED \$p\"; fi
-    done" > "$MODLIST" 2>/dev/null || true
+    done" > "$MODLIST_RAW" 2>/dev/null || true
+  SKIPPED_NOISE=$(grep -c "MODIFIED" "$MODLIST_RAW" 2>/dev/null || true)
+  awk -v re="$NOISE_RE" '{ p=$2; if (p !~ re) print }' "$MODLIST_RAW" > "$MODLIST" 2>/dev/null || : > "$MODLIST"
+  SKIPPED_NOISE=$(( ${SKIPPED_NOISE:-0} - $(grep -c '^MODIFIED' "$MODLIST" 2>/dev/null || echo 0) ))
+  case "$SKIPPED_NOISE" in ''|*[!0-9]*) SKIPPED_NOISE=0 ;; esac
   MODIFIED_COUNT=$(grep -c '^MODIFIED' "$MODLIST" 2>/dev/null)
   case "$MODIFIED_COUNT" in ''|*[!0-9]*) MODIFIED_COUNT=0 ;; esac
   while read -r kind p; do
@@ -289,6 +301,7 @@ if [ -n "$CUR_TAG" ]; then
   else
     ok "tidak ada modifikasi lokal — instalasi bersih (aman)"
   fi
+  [ "${SKIPPED_NOISE:-0}" -gt 0 ] 2>/dev/null && info "$SKIPPED_NOISE artefak build/config internal diabaikan (config skill tetap diamankan + dipulihkan)"
 else
   warn "tag versi lokal tidak dikenali — lewati pemeriksaan"
 fi
