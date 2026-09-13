@@ -144,3 +144,66 @@ sudo systemctl restart evonic
 ```
 
 `update.sh` memanggil helper ini otomatis setelah update (kalau helper ada).
+
+## Mode akses: HTTP saja atau HTTPS + domain
+
+Setelah update selesai, script menawarkan pilihan (hanya kalau ada terminal):
+
+```
+  1) HTTP saja          → http://IP:8080   (cookie non-Secure, cukup untuk testing/internal)
+  2) HTTPS + domain     → https://domain   (nginx + Let's Encrypt, tanpa port, cookie Secure)
+```
+
+Pilih `2` → script menampilkan peringatan A record dulu, minta domain (+ email opsional),
+lalu memasang nginx reverse proxy dan sertifikat Let's Encrypt secara otomatis.
+
+**Sebelum memilih opsi 2, wajib:**
+
+| Syarat | Detail |
+|---|---|
+| A record | `A` → `Value` = IP publik VPS (TTL 14400). Script memverifikasi lewat DNS publik dan berhenti kalau belum cocok |
+| Propagasi | 5–30 menit |
+| Port 80 & 443 | Harus terbuka di firewall/security group VPS (Let's Encrypt verifikasi via port 80) |
+
+Non-interaktif (cocok untuk cron/CI):
+
+```bash
+# tetap HTTP
+curl -sS .../main/update.sh | bash -s -- --http-only
+
+# langsung pasang HTTPS + domain
+curl -sS .../main/update.sh | bash -s -- --https --domain evonic.domainmu.com --email you@domainmu.com
+```
+
+### Helper standalone: `evonic-https-setup.sh`
+
+```bash
+sudo evonic-https-setup.sh --domain evonic.domainmu.com --email you@domainmu.com
+sudo evonic-https-setup.sh --domain evonic.domainmu.com --yes        # tanpa konfirmasi
+```
+
+Yang dilakukan: deteksi IP publik → verifikasi A record → install nginx + certbot →
+vhost reverse proxy (SSE/streaming friendly: `proxy_buffering off`, timeout 3600s,
+WebSocket upgrade, upload 200m) → sertifikat Let's Encrypt + redirect HTTP→HTTPS →
+set `FORCE_INSECURE_COOKIES=0` → restart service.
+
+### Cookie & login (penting)
+
+`app.py` menandai cookie session `Secure` secara default. Browser **menolak menyimpan
+cookie Secure dari koneksi HTTP**, jadi login seolah gagal (padahal password benar).
+Script menyesuaikan otomatis:
+
+| Mode akses | `FORCE_INSECURE_COOKIES` | Efek |
+|---|---|---|
+| `http://IP:8080` | `1` | cookie non-Secure → login jalan, tapi sesi bisa disadap di jaringan tidak aman |
+| `https://domain` | `0` (dihapus) | cookie Secure → aman, dipakai untuk produksi |
+
+Script mendeteksi vhost HTTPS yang aktif dan menyetel nilainya sendiri tiap update.
+
+### VPS tanpa IPv6
+
+nginx bawaan Ubuntu listen di `[::]:80`. Di VPS yang IPv6-nya nonaktif service gagal
+start (`socket() [::]:80 failed (97: Address family not supported by protocol)`) dan
+`dpkg` ikut gagal. `evonic-https-setup.sh` mendeteksi ini, menonaktifkan baris
+`listen [::]` di `nginx.conf` + vhost, lalu merapikan paket setengah terpasang
+(`dpkg --configure -a`).
